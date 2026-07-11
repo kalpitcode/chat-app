@@ -51,6 +51,7 @@ Required values:
 
 Optional values:
 
+- `STORAGE_DIR`
 - `JWT_SECRET`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
@@ -98,6 +99,37 @@ server.cjs             Custom Next.js + WebSocket dev/prod server
 npm run lint
 npm test
 ```
+
+## Deploy on Render
+
+This project is best deployed as a single Render web service, not a static or serverless deployment. That is because it uses:
+
+- a custom Node server for WebSockets
+- SQLite for persistence
+- local file uploads
+
+The repo includes a [`render.yaml`](./render.yaml) Blueprint for this setup.
+
+### Recommended deployment steps
+
+1. Push the latest code to GitHub.
+2. In Render, create a new Blueprint from this repository.
+3. Keep the included persistent disk mounted at `/var/data`.
+4. Set `NEXTAUTH_URL` to your final Render domain, for example `https://wavechat.onrender.com`.
+5. Deploy the service.
+
+### Production environment values
+
+The included Render config uses:
+
+- `DATABASE_URL=file:/var/data/dev.db`
+- `STORAGE_DIR=/var/data`
+
+This keeps both the SQLite database and uploaded files on Render's persistent disk.
+
+### Important production note
+
+Because this deployment uses SQLite plus local disk-backed uploads, keep the service on a single instance. If you later want multi-instance scaling, move to Postgres and object storage.
 
 ## Why This Project Stands Out
 
