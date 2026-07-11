@@ -6,7 +6,7 @@ const { WebSocketServer } = require("ws")
 const jwt = require("jsonwebtoken")
 
 const dev = process.argv[2] !== "start"
-const hostname = process.env.HOSTNAME || "0.0.0.0"
+const hostname = process.env.HOST || process.env.HOSTNAME || "0.0.0.0"
 const port = Number(process.env.PORT || 3000)
 const app = next({ dev, hostname, port, webpack: true })
 const handle = app.getRequestHandler()
@@ -109,6 +109,13 @@ app.prepare().then(() => {
   })
 
   server.listen(port, hostname, () => {
-    console.log(`> Ready on http://${hostname}:${port}`)
+    const localUrl = `http://localhost:${port}`
+    const boundUrl = `http://${hostname}:${port}`
+
+    console.log(`> Local:   ${localUrl}`)
+
+    if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+      console.log(`> Network: ${boundUrl}`)
+    }
   })
 })
