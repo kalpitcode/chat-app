@@ -1,5 +1,7 @@
+import { Prisma } from "@prisma/client"
 import bcrypt from "bcrypt"
 import prisma from "@/lib/prisma"
+import { broadcastChatEvent } from "@/lib/realtime"
 
 const DEMO_PASSWORD = "demo123"
 
@@ -23,6 +25,31 @@ type ChatSummary = {
     seenAt: Date | null
   } | null
   unreadCount: number
+}
+
+function getMessagePreview(message: {
+  deletedAt: Date | null
+  attachmentName: string | null
+  attachmentType: string | null
+  content: string
+}) {
+  if (message.deletedAt) {
+    return "This message was deleted"
+  }
+
+  if (message.content) {
+    return message.content
+  }
+
+  if (message.attachmentType?.startsWith("image/")) {
+    return "Photo"
+  }
+
+  if (message.attachmentName) {
+    return `Attachment: ${message.attachmentName}`
+  }
+
+  return "Attachment"
 }
 
 export function orderParticipantIds(userId: string, contactId: string) {
@@ -145,6 +172,28 @@ export async function getOrCreateDirectConversation(userId: string, contactId: s
   })
 }
 
+export function getConversationParticipantIds(conversation: {
+  firstUserId: string
+  secondUserId: string
+}) {
+  return [conversation.firstUserId, conversation.secondUserId]
+}
+
+const ownedMessageQuery = Prisma.validator<Prisma.MessageDefaultArgs>()({
+  include: {
+    conversation: true,
+    sender: {
+      select: {
+        id: true,
+        name: true,
+        avatarSeed: true
+      }
+    }
+  }
+})
+
+type OwnedMessage = Prisma.MessageGetPayload<typeof ownedMessageQuery>
+
 export async function getChatSummaries(userId: string) {
   const conversations = await prisma.conversation.findMany({
     where: {
@@ -173,6 +222,16 @@ export async function getChatSummaries(userId: string) {
         orderBy: {
           createdAt: "desc"
         },
+        select: {
+          id: true,
+          content: true,
+          createdAt: true,
+          senderId: true,
+          seenAt: true,
+          deletedAt: true,
+          attachmentName: true,
+          attachmentType: true
+        },
         take: 1
       }
     },
@@ -198,7 +257,12 @@ export async function getChatSummaries(userId: string) {
         id: conversation.id,
         updatedAt: conversation.updatedAt,
         contact,
-        lastMessage: conversation.messages[0] ?? null,
+        lastMessage: conversation.messages[0]
+          ? {
+              ...conversation.messages[0],
+              content: getMessagePreview(conversation.messages[0])
+            }
+          : null,
         unreadCount
       } satisfies ChatSummary
     })
@@ -226,7 +290,7 @@ export async function getContacts(userId: string) {
 }
 
 export async function getConversationForUser(conversationId: string, userId: string) {
-  await prisma.message.updateMany({
+  const seenResult = await prisma.message.updateMany({
     where: {
       conversationId,
       senderId: { not: userId },
@@ -237,7 +301,7 @@ export async function getConversationForUser(conversationId: string, userId: str
     }
   })
 
-  return prisma.conversation.findFirst({
+  const conversation = await prisma.conversation.findFirst({
     where: {
       id: conversationId,
       OR: [{ firstUserId: userId }, { secondUserId: userId }]
@@ -277,4 +341,226 @@ export async function getConversationForUser(conversationId: string, userId: str
       }
     }
   })
+
+  if (conversation && seenResult.count > 0) {
+    broadcastChatEvent({
+      type: "message:seen",
+      conversationId: conversation.id,
+      actorId: userId,
+      recipientIds: getConversationParticipantIds(conversation)
+    })
+  }
+
+  return conversation
+}
+
+export async function getMessageForOwner(
+  messageId: string,
+  userId: string
+): Promise<OwnedMessage | null> {
+  return prisma.message.findFirst({
+    where: {
+      id: messageId,
+      senderId: userId
+    },
+    ...ownedMessageQuery
+  })
+}
+
+export async function createTextMessage(conversationId: string, senderId: string, content: string) {
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      id: conversationId,
+      OR: [{ firstUserId: senderId }, { secondUserId: senderId }]
+    }
+  })
+
+  if (!conversation) {
+    return null
+  }
+
+  const [message] = await prisma.$transaction([
+    prisma.message.create({
+      data: {
+        conversationId,
+        senderId,
+        content
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            name: true,
+            avatarSeed: true
+          }
+        }
+      }
+    }),
+    prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() }
+    })
+  ])
+
+  broadcastChatEvent({
+    type: "message:created",
+    conversationId,
+    messageId: message.id,
+    actorId: senderId,
+    recipientIds: getConversationParticipantIds(conversation)
+  })
+
+  return message
+}
+
+export async function createAttachmentMessage(
+  conversationId: string,
+  senderId: string,
+  payload: {
+    content: string
+    attachmentUrl: string
+    attachmentType: string
+    attachmentName: string
+    attachmentSize: number
+  }
+) {
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      id: conversationId,
+      OR: [{ firstUserId: senderId }, { secondUserId: senderId }]
+    }
+  })
+
+  if (!conversation) {
+    return null
+  }
+
+  const [message] = await prisma.$transaction([
+    prisma.message.create({
+      data: {
+        conversationId,
+        senderId,
+        content: payload.content,
+        attachmentUrl: payload.attachmentUrl,
+        attachmentType: payload.attachmentType,
+        attachmentName: payload.attachmentName,
+        attachmentSize: payload.attachmentSize
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            name: true,
+            avatarSeed: true
+          }
+        }
+      }
+    }),
+    prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() }
+    })
+  ])
+
+  broadcastChatEvent({
+    type: "message:created",
+    conversationId,
+    messageId: message.id,
+    actorId: senderId,
+    recipientIds: getConversationParticipantIds(conversation)
+  })
+
+  return message
+}
+
+export async function updateOwnMessage(messageId: string, userId: string, content: string) {
+  const message = await getMessageForOwner(messageId, userId)
+
+  if (!message || message.deletedAt) {
+    return null
+  }
+
+  const editWindowMs = 15 * 60 * 1000
+  if (Date.now() - message.createdAt.getTime() > editWindowMs) {
+    const error = new Error("Edit window has expired")
+    ;(error as Error & { status?: number }).status = 403
+    throw error
+  }
+
+  const updatedMessage = await prisma.message.update({
+    where: { id: messageId },
+    data: {
+      content,
+      editedAt: new Date()
+    },
+    include: {
+      sender: {
+        select: {
+          id: true,
+          name: true,
+          avatarSeed: true
+        }
+      }
+    }
+  })
+
+  await prisma.conversation.update({
+    where: { id: message.conversationId },
+    data: { updatedAt: new Date() }
+  })
+
+  broadcastChatEvent({
+    type: "message:updated",
+    conversationId: message.conversationId,
+    messageId,
+    actorId: userId,
+    recipientIds: getConversationParticipantIds(message.conversation)
+  })
+
+  return updatedMessage
+}
+
+export async function deleteOwnMessage(messageId: string, userId: string) {
+  const message = await getMessageForOwner(messageId, userId)
+
+  if (!message || message.deletedAt) {
+    return null
+  }
+
+  const deletedMessage = await prisma.message.update({
+    where: { id: messageId },
+    data: {
+      content: "",
+      attachmentUrl: null,
+      attachmentType: null,
+      attachmentName: null,
+      attachmentSize: null,
+      deletedAt: new Date(),
+      editedAt: null
+    },
+    include: {
+      sender: {
+        select: {
+          id: true,
+          name: true,
+          avatarSeed: true
+        }
+      }
+    }
+  })
+
+  await prisma.conversation.update({
+    where: { id: message.conversationId },
+    data: { updatedAt: new Date() }
+  })
+
+  broadcastChatEvent({
+    type: "message:deleted",
+    conversationId: message.conversationId,
+    messageId,
+    actorId: userId,
+    recipientIds: getConversationParticipantIds(message.conversation)
+  })
+
+  return deletedMessage
 }

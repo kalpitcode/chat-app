@@ -10,8 +10,12 @@ export async function POST(req: Request) {
     await ensureDemoData()
 
     const body = await req.json()
+    const parsed = signupSchema.safeParse(body)
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.issues[0]?.message || "Invalid request" }, { status: 400 })
+    }
 
-    const { name, email, password, role } = signupSchema.parse(body)
+    const { name, email, password, role } = parsed.data
 
     const existingUser = await prisma.user.findUnique({
       where: { email }

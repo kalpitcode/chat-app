@@ -1,11 +1,14 @@
 "use client"
 
+import Image from "next/image"
 import {
+  type ChangeEvent,
+  type FormEvent,
+  type KeyboardEvent,
   useCallback,
-  FormEvent,
   useDeferredValue,
   useEffect,
-  KeyboardEvent,
+  useMemo,
   useRef,
   useState,
   useTransition,
@@ -45,8 +48,14 @@ type ChatMessage = {
   id: string
   content: string
   createdAt: string
+  editedAt: string | null
+  deletedAt: string | null
   seenAt: string | null
   senderId: string
+  attachmentUrl: string | null
+  attachmentType: string | null
+  attachmentName: string | null
+  attachmentSize: number | null
   sender: {
     id: string
     name: string
@@ -58,6 +67,11 @@ type Conversation = {
   id: string
   contact: Contact
   messages: ChatMessage[]
+}
+
+type AttachmentPreview = {
+  file: File
+  previewUrl: string
 }
 
 function avatarTone(seed: string) {
@@ -88,6 +102,26 @@ function formatTime(value: string) {
   }).format(new Date(value))
 }
 
+function formatAttachmentSize(size: number | null) {
+  if (!size) {
+    return ""
+  }
+
+  if (size < 1024 * 1024) {
+    return `${Math.max(1, Math.round(size / 1024))} KB`
+  }
+
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function isImageAttachment(message: ChatMessage) {
+  return Boolean(message.attachmentType?.startsWith("image/") && message.attachmentUrl)
+}
+
+function isPdfAttachment(message: ChatMessage) {
+  return message.attachmentType === "application/pdf" && Boolean(message.attachmentUrl)
+}
+
 export default function ChatPage() {
   const router = useRouter()
   const [token, setToken] = useState("")
@@ -101,43 +135,62 @@ export default function ChatPage() {
   const [status, setStatus] = useState("Loading your chats...")
   const [error, setError] = useState("")
   const [sending, setSending] = useState(false)
+  const [editingMessageId, setEditingMessageId] = useState("")
+  const [editingDraft, setEditingDraft] = useState("")
+  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview | null>(null)
+  const [socketConnected, setSocketConnected] = useState(false)
   const [isPending, startTransition] = useTransition()
   const activeChatIdRef = useRef("")
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const deferredSearch = useDeferredValue(search)
 
-  const filteredChats = chats.filter((chat) => {
-    const query = deferredSearch.trim().toLowerCase()
-    if (!query) return true
+  const filteredChats = useMemo(() => {
+    return chats.filter((chat) => {
+      const query = deferredSearch.trim().toLowerCase()
+      if (!query) return true
 
-    return (
-      chat.contact.name.toLowerCase().includes(query) ||
-      chat.contact.email.toLowerCase().includes(query) ||
-      chat.lastMessage?.content.toLowerCase().includes(query)
-    )
-  })
+      return (
+        chat.contact.name.toLowerCase().includes(query) ||
+        chat.contact.email.toLowerCase().includes(query) ||
+        chat.lastMessage?.content.toLowerCase().includes(query)
+      )
+    })
+  }, [chats, deferredSearch])
 
-  const suggestedContacts = contacts.filter((contact) => {
-    const query = deferredSearch.trim().toLowerCase()
-    if (!query) return true
+  const suggestedContacts = useMemo(() => {
+    return contacts.filter((contact) => {
+      const query = deferredSearch.trim().toLowerCase()
+      if (!query) return true
 
-    return (
-      contact.name.toLowerCase().includes(query) ||
-      contact.email.toLowerCase().includes(query)
-    )
-  })
+      return (
+        contact.name.toLowerCase().includes(query) ||
+        contact.email.toLowerCase().includes(query)
+      )
+    })
+  }, [contacts, deferredSearch])
 
   const handleUnauthorized = useCallback(() => {
     window.localStorage.removeItem("token")
     router.replace("/login")
   }, [router])
 
+  const clearAttachmentPreview = useCallback(() => {
+    setAttachmentPreview((current) => {
+      if (current) {
+        URL.revokeObjectURL(current.previewUrl)
+      }
+      return null
+    })
+  }, [])
+
   const authorizedFetch = useCallback(async (input: string, init?: RequestInit) => {
     const currentToken = token || window.localStorage.getItem("token") || ""
     const headers = new Headers(init?.headers)
 
     headers.set("authorization", `Bearer ${currentToken}`)
-    if (init?.body && !headers.has("Content-Type")) {
+
+    if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json")
     }
 
@@ -156,6 +209,7 @@ export default function ChatPage() {
     }
 
     const body = await response.json()
+
     if (!response.ok) {
       setError(body.error || "Unable to load conversation.")
       return
@@ -208,6 +262,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     const storedToken = window.localStorage.getItem("token")
+
     if (!storedToken) {
       router.replace("/login")
       return
@@ -227,11 +282,40 @@ export default function ChatPage() {
   useEffect(() => {
     if (!token) return
 
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws"
+    const socket = new WebSocket(`${protocol}://${window.location.host}/ws?token=${encodeURIComponent(token)}`)
+
+    socket.onopen = () => {
+      setSocketConnected(true)
+    }
+
+    socket.onmessage = () => {
+      startTransition(() => {
+        void loadDashboard(activeChatIdRef.current || undefined)
+      })
+    }
+
+    socket.onclose = () => {
+      setSocketConnected(false)
+    }
+
+    socket.onerror = () => {
+      setSocketConnected(false)
+    }
+
+    return () => {
+      socket.close()
+    }
+  }, [token, loadDashboard])
+
+  useEffect(() => {
+    if (!token) return
+
     const interval = window.setInterval(() => {
       startTransition(() => {
         void loadDashboard(activeChatIdRef.current || undefined)
       })
-    }, 3000)
+    }, 15000)
 
     return () => window.clearInterval(interval)
   }, [token, loadDashboard])
@@ -239,6 +323,14 @@ export default function ChatPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [conversation?.messages.length, activeChatId])
+
+  useEffect(() => {
+    return () => {
+      if (attachmentPreview) {
+        URL.revokeObjectURL(attachmentPreview.previewUrl)
+      }
+    }
+  }, [attachmentPreview])
 
   async function startDirectChat(contactId: string) {
     const response = await authorizedFetch("/api/chats/direct", {
@@ -252,6 +344,7 @@ export default function ChatPage() {
     }
 
     const body = await response.json()
+
     if (!response.ok) {
       setError(body.error || "Unable to start chat.")
       return
@@ -260,25 +353,56 @@ export default function ChatPage() {
     await loadDashboard(body.conversationId)
   }
 
-  async function submitDraft() {
-    const content = draft.trim()
-    if (!content || !activeChatId) return
+  async function submitComposer() {
+    if (!activeChatId) return
 
     setSending(true)
     setError("")
 
     try {
+      if (attachmentPreview) {
+        const formData = new FormData()
+        formData.append("file", attachmentPreview.file)
+        formData.append("content", draft.trim())
+
+        const response = await authorizedFetch(`/api/chats/${activeChatId}/uploads`, {
+          method: "POST",
+          body: formData
+        })
+
+        const body = await response.json()
+
+        if (response.status === 401) {
+          handleUnauthorized()
+          return
+        }
+
+        if (!response.ok) {
+          setError(body.error || "Unable to upload attachment.")
+          return
+        }
+
+        setDraft("")
+        clearAttachmentPreview()
+        await loadDashboard(activeChatId)
+        return
+      }
+
+      const content = draft.trim()
+      if (!content) return
+
       const response = await authorizedFetch(`/api/chats/${activeChatId}/messages`, {
         method: "POST",
         body: JSON.stringify({ content })
       })
+
+      const body = await response.json()
 
       if (response.status === 401) {
         handleUnauthorized()
         return
       }
 
-      const body = await response.json()
       if (!response.ok) {
         setError(body.error || "Unable to send message.")
         return
@@ -291,18 +415,79 @@ export default function ChatPage() {
     }
   }
 
-  async function sendMessage(event: FormEvent<HTMLFormElement>) {
+  async function submitEditedMessage(messageId: string) {
+    if (!editingDraft.trim()) return
+
+    const response = await authorizedFetch(`/api/messages/${messageId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ content: editingDraft.trim() })
+    })
+
+    const body = await response.json()
+
+    if (response.status === 401) {
+      handleUnauthorized()
+      return
+    }
+
+    if (!response.ok) {
+      setError(body.error || "Unable to update message.")
+      return
+    }
+
+    setEditingMessageId("")
+    setEditingDraft("")
+    await loadDashboard(activeChatIdRef.current || undefined)
+  }
+
+  async function deleteMessage(messageId: string) {
+    const response = await authorizedFetch(`/api/messages/${messageId}`, {
+      method: "DELETE"
+    })
+
+    const body = await response.json()
+
+    if (response.status === 401) {
+      handleUnauthorized()
+      return
+    }
+
+    if (!response.ok) {
+      setError(body.error || "Unable to delete message.")
+      return
+    }
+
+    await loadDashboard(activeChatIdRef.current || undefined)
+  }
+
+  function onComposerSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    await submitDraft()
+    void submitComposer()
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault()
-      if (draft.trim() && !sending) {
-        void submitDraft()
+
+      if ((draft.trim() || attachmentPreview) && !sending) {
+        void submitComposer()
       }
     }
+  }
+
+  function onAttachmentChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+
+    if (!file) {
+      return
+    }
+
+    clearAttachmentPreview()
+    setAttachmentPreview({
+      file,
+      previewUrl: URL.createObjectURL(file)
+    })
+    event.target.value = ""
   }
 
   function logout() {
@@ -325,8 +510,8 @@ export default function ChatPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <div className="hidden rounded-full bg-white/6 px-3 py-1.5 text-[11px] font-semibold text-[#8fa3ad] md:block">
-                chats
+              <div className={`hidden rounded-full px-3 py-1.5 text-[11px] font-semibold md:block ${socketConnected ? "bg-emerald-500/15 text-emerald-300" : "bg-white/6 text-[#8fa3ad]"}`}>
+                {socketConnected ? "realtime on" : "polling fallback"}
               </div>
               <button
                 type="button"
@@ -428,24 +613,26 @@ export default function ChatPage() {
                   </div>
                   <div>
                     <p className="font-semibold">{conversation.contact.name}</p>
-                    <p className="text-xs text-[#8fa3ad]">{isPending ? "syncing..." : "online on localhost"}</p>
+                    <p className="text-xs text-[#8fa3ad]">{socketConnected ? "connected live" : "syncing with fallback polling"}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-[#8fa3ad]">
-                  <span className="hidden rounded-full bg-white/6 px-3 py-1.5 md:inline-flex">video</span>
-                  <span className="hidden rounded-full bg-white/6 px-3 py-1.5 md:inline-flex">call</span>
-                  <span className="hidden rounded-full bg-white/6 px-3 py-1.5 md:inline-flex">search</span>
-                  <span>{isPending ? "Refreshing..." : "Synced every 3 seconds"}</span>
+                  <span className="hidden rounded-full bg-white/6 px-3 py-1.5 md:inline-flex">media</span>
+                  <span className="hidden rounded-full bg-white/6 px-3 py-1.5 md:inline-flex">edit</span>
+                  <span className="hidden rounded-full bg-white/6 px-3 py-1.5 md:inline-flex">delete</span>
+                  <span>{isPending ? "Refreshing..." : socketConnected ? "Live" : "Fallback mode"}</span>
                 </div>
               </header>
 
               <div className="relative z-10 flex-1 overflow-y-auto px-4 py-6 md:px-8">
                 <div className="mx-auto flex max-w-4xl flex-col gap-2">
                   <div className="mb-3 self-center rounded-full bg-[#1f2c34]/90 px-4 py-1.5 text-[11px] uppercase tracking-[0.2em] text-[#9eb2bc] shadow">
-                    encrypted-style demo chat
+                    recruiter-upgrade build
                   </div>
+
                   {conversation.messages.map((message) => {
                     const isMine = message.senderId === user?.id
+                    const isEditing = editingMessageId === message.id
 
                     return (
                       <div
@@ -453,44 +640,179 @@ export default function ChatPage() {
                         className={`flex ${isMine ? "justify-end" : "justify-start"}`}
                       >
                         <div
-                          className={`max-w-[85%] rounded-[1.35rem] px-4 py-3 shadow-md md:max-w-[70%] ${isMine ? "rounded-br-sm bg-[#144d37] text-[#effff5]" : "rounded-bl-sm bg-[#202c33] text-[#e0edf3]"}`}
+                          className={`max-w-[88%] rounded-[1.35rem] px-4 py-3 shadow-md md:max-w-[70%] ${isMine ? "rounded-br-sm bg-[#144d37] text-[#effff5]" : "rounded-bl-sm bg-[#202c33] text-[#e0edf3]"}`}
                         >
-                          <p className="text-[15px] leading-6">{message.content}</p>
+                          {message.deletedAt ? (
+                            <p className="text-[15px] italic text-[#b7c9d2]">This message was deleted</p>
+                          ) : isEditing ? (
+                            <div className="space-y-3">
+                              <textarea
+                                rows={3}
+                                value={editingDraft}
+                                onChange={(event) => setEditingDraft(event.target.value)}
+                                className="w-full rounded-2xl bg-black/15 px-3 py-2 text-sm text-white outline-none"
+                              />
+                              <div className="flex justify-end gap-2 text-xs">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingMessageId("")
+                                    setEditingDraft("")
+                                  }}
+                                  className="rounded-full bg-white/10 px-3 py-1.5"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void submitEditedMessage(message.id)}
+                                  className="rounded-full bg-[#25d366] px-3 py-1.5 font-semibold text-[#062915]"
+                                >
+                                  Save
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              {isImageAttachment(message) && (
+                                <a href={message.attachmentUrl || "#"} target="_blank" rel="noreferrer">
+                                  <Image
+                                    src={message.attachmentUrl || ""}
+                                    alt={message.attachmentName || "attachment"}
+                                    width={1200}
+                                    height={800}
+                                    unoptimized
+                                    className="mb-3 max-h-72 w-full rounded-2xl object-cover"
+                                  />
+                                </a>
+                              )}
+
+                              {isPdfAttachment(message) && (
+                                <a
+                                  href={message.attachmentUrl || "#"}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mb-3 block rounded-2xl bg-black/15 px-4 py-3 text-sm font-medium text-[#d8f3e1]"
+                                >
+                                  Open PDF: {message.attachmentName}
+                                  <span className="ml-2 text-xs opacity-75">{formatAttachmentSize(message.attachmentSize)}</span>
+                                </a>
+                              )}
+
+                              {!isImageAttachment(message) && message.attachmentUrl && !isPdfAttachment(message) && (
+                                <a
+                                  href={message.attachmentUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mb-3 block rounded-2xl bg-black/15 px-4 py-3 text-sm font-medium text-[#d8f3e1]"
+                                >
+                                  Download: {message.attachmentName}
+                                  <span className="ml-2 text-xs opacity-75">{formatAttachmentSize(message.attachmentSize)}</span>
+                                </a>
+                              )}
+
+                              {message.content && <p className="text-[15px] leading-6">{message.content}</p>}
+
+                              {isMine && !message.deletedAt && (
+                                <div className="mt-3 flex justify-end gap-2 text-[11px]">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingMessageId(message.id)
+                                      setEditingDraft(message.content)
+                                    }}
+                                    className="rounded-full bg-white/8 px-2.5 py-1"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void deleteMessage(message.id)}
+                                    className="rounded-full bg-white/8 px-2.5 py-1"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              )}
+                            </>
+                          )}
+
                           <div className={`mt-2 flex items-center gap-2 text-[11px] ${isMine ? "justify-end text-[#b5d6c8]" : "justify-end text-[#8fa3ad]"}`}>
                             <span>{formatTime(message.createdAt)}</span>
-                            {isMine && <span>{message.seenAt ? "Seen" : "Sent"}</span>}
+                            {message.editedAt && !message.deletedAt && <span>edited</span>}
+                            {isMine && !message.deletedAt && <span>{message.seenAt ? "Seen" : "Sent"}</span>}
                           </div>
                         </div>
                       </div>
                     )
                   })}
+
                   <div ref={messagesEndRef} />
                 </div>
               </div>
 
-              <form onSubmit={sendMessage} className="relative z-10 border-t border-white/6 bg-[#202c33] px-4 py-4 md:px-6">
-                <div className="mx-auto flex max-w-4xl items-end gap-3">
-                  <div className="hidden h-[52px] items-center rounded-full bg-[#2a3942] px-4 text-sm text-[#93a7b2] md:flex">
-                    emoji
+              <form onSubmit={onComposerSubmit} className="relative z-10 border-t border-white/6 bg-[#202c33] px-4 py-4 md:px-6">
+                <div className="mx-auto max-w-4xl">
+                  {attachmentPreview && (
+                    <div className="mb-3 rounded-[1.5rem] bg-[#2a3942] p-3">
+                      <div className="mb-2 flex items-center justify-between text-xs text-[#b2c2ca]">
+                        <span>{attachmentPreview.file.name}</span>
+                        <button
+                          type="button"
+                          onClick={clearAttachmentPreview}
+                          className="rounded-full bg-white/8 px-2.5 py-1"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      {attachmentPreview.file.type.startsWith("image/") ? (
+                        <Image
+                          src={attachmentPreview.previewUrl}
+                          alt={attachmentPreview.file.name}
+                          width={1200}
+                          height={800}
+                          unoptimized
+                          className="max-h-48 rounded-2xl object-cover"
+                        />
+                      ) : (
+                        <div className="rounded-2xl bg-black/15 px-4 py-3 text-sm text-[#d7e4ea]">
+                          Ready to upload {attachmentPreview.file.name}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="hidden h-[52px] items-center rounded-full bg-[#2a3942] px-4 text-sm text-[#93a7b2] md:flex"
+                    >
+                      attach
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif,application/pdf"
+                      onChange={onAttachmentChange}
+                      className="hidden"
+                    />
+                    <textarea
+                      rows={1}
+                      value={draft}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={onComposerKeyDown}
+                      placeholder={attachmentPreview ? "Add a caption (optional)" : "Type a message"}
+                      className="max-h-40 min-h-[52px] flex-1 resize-y rounded-[1.5rem] bg-[#2a3942] px-5 py-3 text-sm text-white outline-none placeholder:text-[#93a7b2]"
+                    />
+                    <button
+                      type="submit"
+                      disabled={sending || (!draft.trim() && !attachmentPreview)}
+                      className="rounded-full bg-[#25d366] px-5 py-3 text-sm font-semibold text-[#062915] transition hover:bg-[#45e07c] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {sending ? "Sending..." : attachmentPreview ? "Upload" : "Send"}
+                    </button>
                   </div>
-                  <textarea
-                    rows={1}
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                    onKeyDown={onComposerKeyDown}
-                    placeholder="Type a message"
-                    className="max-h-40 min-h-[52px] flex-1 resize-y rounded-[1.5rem] bg-[#2a3942] px-5 py-3 text-sm text-white outline-none placeholder:text-[#93a7b2]"
-                  />
-                  <div className="hidden h-[52px] items-center rounded-full bg-[#2a3942] px-4 text-sm text-[#93a7b2] md:flex">
-                    attach
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={sending || !draft.trim()}
-                    className="rounded-full bg-[#25d366] px-5 py-3 text-sm font-semibold text-[#062915] transition hover:bg-[#45e07c] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {sending ? "Sending..." : "Send"}
-                  </button>
                 </div>
               </form>
             </>
@@ -502,7 +824,7 @@ export default function ChatPage() {
                 </div>
                 <h1 className="mt-6 text-3xl font-black tracking-tight">Choose a contact to begin chatting.</h1>
                 <p className="mt-4 text-sm leading-7 text-[#8fa3ad]">
-                  Your login is working, the database is connected, and the chat engine is ready. Start a direct conversation from the left side to make this feel alive.
+                  Realtime updates, attachments, and message actions are ready once you enter a conversation.
                 </p>
 
                 <div className="mt-8 grid gap-3 md:grid-cols-2">

@@ -45,3 +45,4 @@ next-env.d.ts
 # local sqlite files
 prisma/*.db
 prisma/*.db-journal
+public/uploads/*

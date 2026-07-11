@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
-import prisma from "@/lib/prisma"
 import { authenticate } from "@/lib/authMiddleware"
 import { messageSchema } from "@/lib/validators"
-import { ensureDemoData, getConversationForUser } from "@/lib/chat"
+import { createTextMessage, ensureDemoData } from "@/lib/chat"
+import { enforceRateLimit } from "@/lib/rate-limit"
 
 type RouteContext = {
   params: Promise<{
@@ -21,38 +21,30 @@ export async function POST(req: Request, context: RouteContext) {
 
   const { chatId } = await context.params
   const body = await req.json()
-  const { content } = messageSchema.parse(body)
+  const parsed = messageSchema.safeParse(body)
 
-  const conversation = await getConversationForUser(chatId, auth.user.userId)
-
-  if (!conversation) {
-    return NextResponse.json({ error: "Conversation not found" }, { status: 404 })
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.issues[0]?.message || "Invalid request" }, { status: 400 })
   }
 
-  const [message] = await prisma.$transaction([
-    prisma.message.create({
-      data: {
-        conversationId: chatId,
-        senderId: auth.user.userId,
-        content
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            avatarSeed: true
-          }
-        }
+  try {
+    enforceRateLimit(`message:${auth.user.userId}`, 20, 60_000)
+  } catch (error) {
+    const retryAfterSeconds = (error as Error & { retryAfterSeconds?: number }).retryAfterSeconds
+    return NextResponse.json(
+      { error: "Too many messages sent too quickly" },
+      {
+        status: 429,
+        headers: retryAfterSeconds ? { "Retry-After": String(retryAfterSeconds) } : undefined
       }
-    }),
-    prisma.conversation.update({
-      where: { id: chatId },
-      data: {
-        updatedAt: new Date()
-      }
-    })
-  ])
+    )
+  }
+
+  const message = await createTextMessage(chatId, auth.user.userId, parsed.data.content)
+
+  if (!message) {
+    return NextResponse.json({ error: "Conversation not found" }, { status: 404 })
+  }
 
   return NextResponse.json({ message })
 }

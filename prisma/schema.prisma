@@ -57,8 +57,14 @@ model Message {
   id             String       @id @default(uuid())
   conversationId String
   senderId       String
-  content        String
+  content        String       @default("")
+  attachmentUrl  String?
+  attachmentType String?
+  attachmentName String?
+  attachmentSize Int?
   createdAt      DateTime     @default(now())
+  editedAt       DateTime?
+  deletedAt      DateTime?
   seenAt         DateTime?
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
