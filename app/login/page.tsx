@@ -4,10 +4,10 @@ import { FormEvent, useState } from "react"
 import { useRouter } from "next/navigation"
 
 const demoAccounts = [
-  { name: "Riya Sharma", email: "riya@chat.local", password: "demo123" },
-  { name: "Kabir Mehta", email: "kabir@chat.local", password: "demo123" },
-  { name: "Aanya Singh", email: "aanya@chat.local", password: "demo123" },
-  { name: "Zoya Khan", email: "zoya@chat.local", password: "demo123" }
+  { name: "Riya Sharma", email: "riya@chat.local", password: "Demo1234" },
+  { name: "Kabir Mehta", email: "kabir@chat.local", password: "Demo1234" },
+  { name: "Aanya Singh", email: "aanya@chat.local", password: "Demo1234" },
+  { name: "Zoya Khan", email: "zoya@chat.local", password: "Demo1234" }
 ]
 
 export default function LoginPage() {
@@ -81,7 +81,7 @@ export default function LoginPage() {
                 >
                   <p className="font-semibold">{account.name}</p>
                   <p className="mt-1 text-sm text-[#c4dbd7]">{account.email}</p>
-                  <p className="mt-2 text-xs uppercase tracking-[0.2em] text-[#8be7c0]">Password: demo123</p>
+                  <p className="mt-2 text-xs uppercase tracking-[0.2em] text-[#8be7c0]">Password: Demo1234</p>
                 </button>
               ))}
             </div>
@@ -143,6 +143,11 @@ export default function LoginPage() {
               onChange={(event) => setPassword(event.target.value)}
               required
             />
+            {isSignup && (
+              <p className="text-xs text-zinc-500">
+                Use at least 8 characters with uppercase, lowercase, and a number.
+              </p>
+            )}
 
             <button
               type="submit"

@@ -3,7 +3,33 @@ import bcrypt from "bcrypt"
 import prisma from "@/lib/prisma"
 import { broadcastChatEvent } from "@/lib/realtime"
 
-const DEMO_PASSWORD = "demo123"
+const DEMO_PASSWORD = "Demo1234"
+const demoSeedUsers = [
+  {
+    name: "Riya Sharma",
+    email: "riya@chat.local",
+    avatarSeed: "riya",
+    about: "Online and planning the weekend."
+  },
+  {
+    name: "Kabir Mehta",
+    email: "kabir@chat.local",
+    avatarSeed: "kabir",
+    about: "Shipping ideas fast."
+  },
+  {
+    name: "Aanya Singh",
+    email: "aanya@chat.local",
+    avatarSeed: "aanya",
+    about: "Coffee first, code second."
+  },
+  {
+    name: "Zoya Khan",
+    email: "zoya@chat.local",
+    avatarSeed: "zoya",
+    about: "Always up for a quick call."
+  }
+] as const
 
 type ChatUser = {
   id: string
@@ -58,51 +84,61 @@ export function orderParticipantIds(userId: string, contactId: string) {
 
 export async function ensureDemoData() {
   const existingUsers = await prisma.user.count()
+  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10)
 
   if (existingUsers > 0) {
+    const existingDemoUsers = await prisma.user.findMany({
+      where: {
+        email: {
+          in: demoSeedUsers.map((user) => user.email)
+        }
+      },
+      select: {
+        email: true
+      }
+    })
+
+    const existingEmails = new Set(existingDemoUsers.map((user) => user.email))
+
+    await prisma.$transaction([
+      ...demoSeedUsers
+        .filter((user) => existingEmails.has(user.email))
+        .map((user) =>
+          prisma.user.update({
+            where: { email: user.email },
+            data: {
+              name: user.name,
+              passwordHash,
+              avatarSeed: user.avatarSeed,
+              about: user.about
+            }
+          })
+        ),
+      ...demoSeedUsers
+        .filter((user) => !existingEmails.has(user.email))
+        .map((user) =>
+          prisma.user.create({
+            data: {
+              ...user,
+              passwordHash
+            }
+          })
+        )
+    ])
+
     return
   }
 
-  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10)
-
-  const [riya, kabir, aanya, zoya] = await Promise.all([
-    prisma.user.create({
-      data: {
-        name: "Riya Sharma",
-        email: "riya@chat.local",
-        passwordHash,
-        avatarSeed: "riya",
-        about: "Online and planning the weekend."
-      }
-    }),
-    prisma.user.create({
-      data: {
-        name: "Kabir Mehta",
-        email: "kabir@chat.local",
-        passwordHash,
-        avatarSeed: "kabir",
-        about: "Shipping ideas fast."
-      }
-    }),
-    prisma.user.create({
-      data: {
-        name: "Aanya Singh",
-        email: "aanya@chat.local",
-        passwordHash,
-        avatarSeed: "aanya",
-        about: "Coffee first, code second."
-      }
-    }),
-    prisma.user.create({
-      data: {
-        name: "Zoya Khan",
-        email: "zoya@chat.local",
-        passwordHash,
-        avatarSeed: "zoya",
-        about: "Always up for a quick call."
-      }
-    })
-  ])
+  const [riya, kabir, aanya, zoya] = await Promise.all(
+    demoSeedUsers.map((user) =>
+      prisma.user.create({
+        data: {
+          ...user,
+          passwordHash
+        }
+      })
+    )
+  )
 
   const seededConversations = [
     {
